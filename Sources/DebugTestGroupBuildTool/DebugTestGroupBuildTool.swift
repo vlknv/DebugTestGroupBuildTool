@@ -2,6 +2,9 @@
 // https://docs.swift.org/swift-book
 
 import Foundation
+import SwiftParser
+import SwiftSyntaxBuilder
+import SwiftSyntax
 
 @main
 struct DebugTestGroupBuildTool {
@@ -32,49 +35,24 @@ struct DebugTestGroupBuildTool {
             throw .previewBuild
         }
         
-        // Получаем список файлов
+        // Получаем директорию с файлами
         guard let directoryPath = env["TEST_GROUPS_DIR"] else {
             throw .inputFolderNotFound
         }
-        
-        let fileManager = FileManager.default
-        let files = try? fileManager.contentsOfDirectory(atPath: directoryPath).filter { $0.hasSuffix(".swift") }
-        
-        guard let files else {
-            throw .filesNotFound(directory: directoryPath)
-        }
-        
+
         // Генерация кода
-        var output = """
-        // The file is generated automatically. Do not modify.
-
-        enum DebugTestGroup: CaseIterable {
-        """
-
-        var cases: [String] = []
-        var switchCases: [String] = []
-
-        files.forEach { file in
-            let fileName = (file as NSString).lastPathComponent
-            let className = (fileName as NSString).deletingPathExtension
-
-            let firstLowerClassName = className.prefix(1).lowercased() + className.dropFirst()
-
-            cases.append("    case \(firstLowerClassName)")
-            switchCases.append("        case .\(firstLowerClassName): \(className).self")
-        }
-
-        output += "\n" + cases.joined(separator: "\n") + "\n"
-        output += """
-
-            var rawValue: any DebuggableTestGroup.Type {
-                switch self {
-        \(switchCases.joined(separator: "\n"))
-                }
-            }
-        }
+        let conformanceProtocolName = "DebuggableTestGroup"
         
-        """
+        let names = try makeTypeNames(
+            in: URL(fileURLWithPath: directoryPath),
+            conforming: conformanceProtocolName
+        )
+        
+        let source = makeSourceFileSyntax(
+            typeName: "DebugTestGroup",
+            protocolName: conformanceProtocolName,
+            debugTypeNames: names
+        )
         
         // Записываем файл
         let args = CommandLine.arguments
@@ -87,11 +65,172 @@ struct DebugTestGroupBuildTool {
             throw .outputFileNotFound
         }
         
+        try write(
+            source: source,
+            to: outputURL
+        )
+    }
+    
+    private static func write(
+        source: SourceFileSyntax,
+        to file: URL
+    ) throws(BuildError) {
         do {
-            try output.write(to: outputURL, atomically: true, encoding: .utf8)
+            try source.formatted().description.write(
+                to: file,
+                atomically: true,
+                encoding: .utf8
+            )
         }
         catch {
             throw .failToWriteToFile(error: error)
         }
+
+    }
+    
+    private static func allSwiftFiles(in directory: URL) -> [URL] {
+        var result: [URL] = []
+        
+        guard let enumerator = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil) else {
+            return []
+        }
+        
+        for case let fileURL as URL in enumerator {
+            if fileURL.pathExtension == "swift" {
+                result.append(fileURL)
+            }
+        }
+        
+        return result
+    }
+    
+    private static func makeTypeNames(
+        in dirURL: URL,
+        conforming protocolName: String
+    ) throws(BuildError) -> [String] {
+        let files = allSwiftFiles(in: dirURL)
+        
+        do {
+            let sources = try files.map { try String(contentsOf: $0, encoding: .utf8) }
+            
+            let finder = ProtocolConformanceFinder(
+                viewMode: .all,
+                protocolName: protocolName
+            )
+            
+            sources.forEach {
+                let syntax = Parser.parse(source: $0)
+                
+                finder.walk(syntax)
+            }
+            
+            return finder.names
+        }
+        catch {
+            throw .fileDecodeError(error)
+        }
+    }
+    
+    private static func makeEnumSyntax(
+        name: String,
+        typeNames: [String]
+    ) -> EnumDeclSyntax {
+        EnumDeclSyntax(
+            name: .identifier(name),
+            inheritanceClause: InheritanceClauseSyntax {
+                InheritedTypeSyntax(type: TypeSyntax(stringLiteral: "CaseIterable"))
+            },
+            memberBlockBuilder: {
+                for name in typeNames {
+                    EnumCaseDeclSyntax {
+                        let caseName = name.prefix(1).lowercased() + name.dropFirst()
+                        
+                        EnumCaseElementSyntax(name: .identifier(caseName))
+                    }
+                }
+            }
+        )
+    }
+    
+    private static func makeSourceFileSyntax(
+        typeName: String,
+        protocolName: String,
+        debugTypeNames: [String]
+    ) -> SourceFileSyntax {
+        let enumDecl = makeEnumSyntax(
+            name: typeName,
+            typeNames: debugTypeNames
+        )
+        
+        let extDecl = makeExtensionSyntax(
+            name: typeName,
+            protocolName: protocolName,
+            debugTypeNames: debugTypeNames
+        )
+        
+        return SourceFileSyntax(
+            statementsBuilder: {
+                enumDecl
+                extDecl
+            }
+        )
+    }
+    
+    private static func makeExtensionSyntax(
+        name: String,
+        protocolName: String,
+        debugTypeNames: [String]
+    ) -> ExtensionDeclSyntax {
+        ExtensionDeclSyntax(
+            extendedType: TypeSyntax(stringLiteral: name),
+            memberBlockBuilder: {
+                VariableDeclSyntax(
+                    .var,
+                    name: .init(stringLiteral: "debugType"),
+                    type: TypeAnnotationSyntax(type: TypeSyntax(stringLiteral: "any \(protocolName).Type")),
+                    accessorBlock: AccessorBlockSyntax(
+                        accessors: .getter(
+                            CodeBlockItemListSyntax(itemsBuilder: {
+                                SwitchExprSyntax(
+                                    switchKeyword: .keyword(.switch, trailingTrivia: .spaces(1)),
+                                    subject: ExprSyntax(stringLiteral: "self"),
+                                    casesBuilder: {
+                                        for name in debugTypeNames { makeSwitchCase(for: name) }
+                                    }
+                                )
+                            })
+                        )
+                    )
+                )
+            }
+        )
+    }
+    
+    private static func makeSwitchCase(for name: String) -> SwitchCaseSyntax {
+        SwitchCaseSyntax(
+            label: .case(
+                SwitchCaseLabelSyntax(
+                    caseKeyword: .keyword(.case, trailingTrivia: .spaces(1)),
+                    caseItems: SwitchCaseItemListSyntax {
+                        SwitchCaseItemSyntax(pattern: PatternSyntax(stringLiteral: ".\(name.lowercasedFirst)"))
+                    },
+                    colon: .colonToken(trailingTrivia: .spaces(1))
+                )
+            ),
+            statements: CodeBlockItemListSyntax {
+                CodeBlockItemSyntax(
+                    item: .expr(ExprSyntax(stringLiteral: "\(name).self")),
+                    semicolon: nil,
+                    trailingTrivia: .newlines(1)
+                )
+            }
+        )
+    }
+
+}
+
+private extension String {
+    var lowercasedFirst: String {
+        prefix(1).lowercased() + dropFirst()
     }
 }
