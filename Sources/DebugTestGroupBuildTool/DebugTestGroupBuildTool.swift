@@ -210,18 +210,16 @@ struct DebugTestGroupBuildTool {
         SwitchCaseSyntax(
             label: .case(
                 SwitchCaseLabelSyntax(
-                    caseKeyword: .keyword(.case, trailingTrivia: .spaces(1)),
+                    caseKeyword: .keyword(.case),
                     caseItems: SwitchCaseItemListSyntax {
                         SwitchCaseItemSyntax(pattern: PatternSyntax(stringLiteral: ".\(name.lowercasedFirst)"))
                     },
-                    colon: .colonToken(trailingTrivia: .spaces(1))
+                    colon: .colonToken()
                 )
             ),
             statements: CodeBlockItemListSyntax {
                 CodeBlockItemSyntax(
-                    item: .expr(ExprSyntax(stringLiteral: "\(name).self")),
-                    semicolon: nil,
-                    trailingTrivia: .newlines(1)
+                    item: .expr(ExprSyntax(stringLiteral: "\(name).self"))
                 )
             }
         )
