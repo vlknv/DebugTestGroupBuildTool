@@ -42,6 +42,7 @@ struct DebugTestGroupBuildTool {
 
         // Генерация кода
         let conformanceProtocolName = "DebuggableTestGroup"
+        let typeName = "DebugTestGroup"
         
         let names = try makeTypeNames(
             in: URL(fileURLWithPath: directoryPath),
@@ -49,35 +50,25 @@ struct DebugTestGroupBuildTool {
         )
         
         let source = makeSourceFileSyntax(
-            typeName: "DebugTestGroup",
+            typeName: typeName,
             protocolName: conformanceProtocolName,
             debugTypeNames: names
         )
         
         // Записываем файл
-        let args = CommandLine.arguments
-        
-        guard
-            let index = args.firstIndex(of: "--output-url"),
-            index + 1 < args.count,
-            let outputURL = URL(string: args[index + 1])
-        else {
-            throw .outputFileNotFound
-        }
-        
         try write(
             source: source,
-            to: outputURL
+            to: typeName + ".swift"
         )
     }
     
     private static func write(
         source: SourceFileSyntax,
-        to file: URL
+        to file: String
     ) throws(BuildError) {
         do {
             try source.formatted().description.write(
-                to: file,
+                toFile: file,
                 atomically: true,
                 encoding: .utf8
             )
